@@ -3,15 +3,14 @@ from uuid import UUID
 from fastapi import Depends, Response
 
 from bi_wiki import __version__
-from bi_wiki.api.deps import DatabaseDep, RunRepo, get_principal
+from bi_wiki.api.deps import DatabaseDep, PrincipalDep, RunRepo, get_principal
 from bi_wiki.api.responses import ApiRouter, ResponderDep
 from bi_wiki.core.errors import ServiceError
+from bi_wiki.ingest.tables import IngestORM
 from bi_wiki.models.responses import ApiResponse, HealthResponse
 from bi_wiki.models.runs import RunCreate, RunRead
 from bi_wiki.models.workflows import (
-    ApprovalRequest,
     CancelRequest,
-    IngestRequest,
     LintRequest,
     QueryRequest,
 )
@@ -43,19 +42,18 @@ async def register_run(
     response_model=ApiResponse[RunRead],
     tags=["runs"],
 )
-async def get_run(run_id: UUID, repo: RunRepo, reply: ResponderDep) -> ApiResponse[RunRead]:
+async def get_run(
+    run_id: UUID, repo: RunRepo, reply: ResponderDep, user: PrincipalDep, db: DatabaseDep
+) -> ApiResponse[RunRead]:
+    async with db.sessions() as session:
+        ingest = await session.get(IngestORM, run_id)
+        if ingest and ingest.owner != user.uid:
+            raise ServiceError("RUN_NOT_FOUND", "任务不存在", 404)
     return reply.ok(await repo.get(run_id))
 
 
 def not_implemented() -> None:
     raise ServiceError("FEATURE_NOT_IMPLEMENTED", "此能力尚未在当前阶段实现", 501)
-
-
-@router.post(
-    "/api/v1/ingests", tags=["reserved"], status_code=501, response_model=ApiResponse[None]
-)
-async def ingest(body: IngestRequest) -> None:
-    not_implemented()
 
 
 @router.post(
@@ -67,16 +65,6 @@ async def query(body: QueryRequest) -> None:
 
 @router.post("/api/v1/lints", tags=["reserved"], status_code=501, response_model=ApiResponse[None])
 async def lint(body: LintRequest) -> None:
-    not_implemented()
-
-
-@router.post(
-    "/api/v1/runs/{run_id}/approve",
-    tags=["reserved"],
-    status_code=501,
-    response_model=ApiResponse[None],
-)
-async def approve(run_id: UUID, body: ApprovalRequest) -> None:
     not_implemented()
 
 

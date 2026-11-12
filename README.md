@@ -205,3 +205,117 @@ async def example(reply: ResponderDep) -> ApiResponse[ExampleRead]:
 路由依然要配置认证依赖；`ApiRouter` 只统一响应声明，不会自动增加认证。
 业务 curl 示例需要另加 `-H "X-MOA-Token: $MOA_TOKEN"`；缺少凭据先返回 401。
 前端已同步使用统一请求客户端解包。更新后重启后端并刷新前端，避免新旧格式混用。
+
+## Ontology Ingest 首版
+
+已增加来源上传、候选定义与关系、计划审核、原子发布、知识与历史版本浏览，以及版本化提取配置。
+前端访问 http://127.0.0.1:5174，登录后依次使用「来源资料 → 生成计划 → 审核 → 知识库」。
+上传支持 UTF-8 Markdown/TXT，最多128 KiB和60000字符；原始字节保存在 var/raw，不覆盖。
+每个MOA用户独立空间，本人审批自己的计划。还没有团队共享/审批角色管理。
+
+模型配置（项目根 .env）：
+
+```dotenv
+BI_WIKI_LLM_BASE_URL=https://your-provider.example/v1
+BI_WIKI_LLM_MODEL=your-model
+BI_WIKI_LLM_API_KEY=replace-locally
+```
+
+地址后由服务追加 /chat/completions。协议要求 JSON object 输出；请求总超时由统一配置推导，
+模型网络超时120秒。未配置会明确拒绝生成，上传与已有知识浏览仍可使用。不复制旧项目凭据。
+修改环境后重启 `uv run --locked bi-wiki`；前端运行 `npm run dev`。
+默认初始化新增6张 ontology_* 表，不修改既有Run表；无需新数据库容器。
+
+本节覆盖前文 Ingest/Approve 均为501的历史说明。新的输入/输出、限制与验收详见
+[Ingest v1](docs/INGEST_V1.md)。Query、独立Lint、通用Cancel仍为501。
+业务API使用既有统一响应和X-MOA-Token。Ingest POST为同步生成，任务失败时读取 data.run.error；
+HTTP200表示成功返回任务状态，不代表知识已经发布。
+
+
+### 统一模型 Provider
+
+`src/bi_wiki/llm/base.py` 定义 `ModelProvider.complete(messages, ...) -> str`，
+`openai_compat.py` 实现 HTTP 协议、鉴权、超时、响应大小限制和错误分类，
+`factory.py` 在应用启动时创建 Provider。支持 chat/completions HTTP Provider 和 CLI Provider，均返回完整文本。
+连接配置统一使用 `BI_WIKI_LLM_BASE_URL`、`BI_WIKI_LLM_MODEL`、
+`BI_WIKI_LLM_API_KEY`；修改后重启服务。不读取旧 BI-WIKI 凭据。
+
+业务通过构造函数注入 Provider；Extractor 只负责提示词和 Ontology 输出校验：
+
+```python
+answer = await provider.complete(messages, temperature=0, max_tokens=12000, json_object=True)
+```
+
+通用调用可省略提取专用参数。新增业务复用 Provider 接口；若需独立模型，使用独立
+ModelConfig 构造实例，在应用组合层注入，业务内部不读取连接配置。
+401/403/429、超时、连接失败、响应格式错误分别分类为 MODEL_AUTH_FAILED、
+MODEL_ACCESS_DENIED、MODEL_RATE_LIMITED、MODEL_TIMEOUT、MODEL_UNAVAILABLE、
+MODEL_RESPONSE_INVALID；有效文本不符合 Ontology Schema 时为 MODEL_OUTPUT_INVALID。
+不转发网关原始错误正文。Ingest 已创建的任务执行失败时，结果中的 Run.status 为 failed，
+Run.error 保存对应错误码；调用方应检查任务状态，不能仅凭 HTTP 200 判断提取成功。
+
+
+### 选择模型 Provider
+
+HTTP 使用 `BI_WIKI_LLM_PROVIDER=openai`（默认），配置 `BI_WIKI_LLM_BASE_URL`、
+`BI_WIKI_LLM_MODEL` 和可选 `BI_WIKI_LLM_API_KEY`。
+CLI 使用以下配置（示例命令需在服务运行环境中安装并完成授权）：
+
+```dotenv
+BI_WIKI_LLM_PROVIDER=cli
+BI_WIKI_LLM_MODEL=your-model
+BI_WIKI_LLM_CLI_COMMAND=["aimana","chat","--model","{model}","--no-stream"]
+BI_WIKI_LLM_TIMEOUT_SECONDS=300
+```
+
+CLI 不需要 BASE_URL / API_KEY；鉴权由命令自身负责。命令读取 stdin 提示词，stdout 必须
+只输出模型回答，不包含进度、日志或外层 JSON 包装。命令参数不经过 Shell，`{model}` 替换为
+配置模型名；服务端命令不能由请求传入。不同 CLI 的参数不同，按其实际协议配置。
+CLI 的 temperature/max_tokens 不自动转换成命令参数，需在命令数组中显式设置；json_object
+通过提示词要求，领域结构仍由 Extractor 校验。两种 Provider 都限制响应大小与调用时间。
+CLI 同时消费 stdout/stderr，执行超时或取消会清理进程；POSIX 系统同时清理所在进程组。
+原 `BI_WIKI_INGEST_MODEL_*` 配置不再读取，没有别名兼容。修改配置后重启服务。
+
+
+### 超时设置
+
+BI_WIKI_LLM_TIMEOUT_SECONDS 默认300秒（最大3600），INGEST_OVERHEAD_SECONDS 默认30秒、
+INGEST_RECOVERY_GRACE_SECONDS 默认60秒，均需BI_WIKI_前缀。
+Ingest执行期限=模型+overhead；中断恢复阈值=执行期限+grace；前端等待=执行期限+30秒。
+HTTP模型调用同时受总时长与10秒连接超时限制。GET /api/v1/ingest-config 返回 timeouts，
+每个新任务固定保存该策略，恢复按最后更新时间和保存的阈值判断。旧任务使用当前策略兜底。
+GET /api/v1/ingest-requests/{key} 可只读查询本人原请求对应任务，无新建任务副作用。
+目前POST /ingests仍同步等待；前端等待超时后查询原请求，若仍运行则按run_id轮询。
+若部署反向代理，其响应等待期限需大于执行期限。异步提交202+run_id尚未实现。
+
+### S3 RawStore
+
+Raw 存储可通过 `BI_WIKI_RAW_BACKEND=local|s3` 切换，默认本地。本地 `RawStore` 与
+`S3RawStore` 提供同一 `put(owner, bytes)` / `read(owner, sha256)` / `close()` 接口，
+IngestService 继续在线程池中调用；lifespan 通过 `create_raw_store` 装配并释放客户端。
+
+```dotenv
+BI_WIKI_RAW_BACKEND=s3
+BI_WIKI_S3_BUCKET=your-existing-bucket
+BI_WIKI_S3_PREFIX=bi-wiki/raw
+BI_WIKI_S3_REGION=us-east-1
+# 仅 S3 兼容服务需要自定义 endpoint / addressing style
+# BI_WIKI_S3_ENDPOINT_URL=http://127.0.0.1:9000
+# BI_WIKI_S3_ADDRESSING_STYLE=path
+```
+
+凭据可使用 boto3 标准凭据链或显式 S3_ACCESS_KEY/S3_SECRET_KEY（均加 BI_WIKI_ 前缀），
+临时凭据可设置 S3_SESSION_TOKEN。密钥仅在环境配置，不能放前端。代码不复制老项目凭据。
+对象键为 `<prefix>/<sha256(owner)>/<sha256(content)>`，原字节保存；数据库仍登记来源元数据。
+桶需要预先存在，程序不自动建桶；运行身份需要该前缀内 GetObject/PutObject 权限。
+不开放公网对象或向浏览器返回预签名链接，读取继续经过 MOA 与来源归属校验。
+
+写入使用 `IfNoneMatch="*"`，已有对象返回412后读取并核验内容，不覆盖。
+不支持条件写入的兼容服务会明确失败，不回退为可覆盖上传。409冲突可重新提交请求，
+不伪报成功。读取限制128KiB并校验SHA-256，网络读取体始终关闭。
+S3原始文件成功但数据库事务失败时不删除原始文件；重试按内容哈希核验后登记。
+
+**切换不等于迁移。** 当前存储选择是部署级配置，来源表未记录逐条存储位置；已有来源必须先
+复制到新桶的同一对象键并核验，才能切换，否则旧来源读取失败。此版本不自动迁移或双读。
+`/health` 仍检查数据库，不保证 S3 权限可用；存储权限和端点在真实读写时验证。
+S3单测使用 botocore Stubber，接口测试结合真实隔离PostgreSQL；未执行真实S3/MinIO端到端验收。

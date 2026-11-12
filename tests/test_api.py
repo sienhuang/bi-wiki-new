@@ -8,6 +8,7 @@ from sqlalchemy.schema import DropTable
 
 from bi_wiki.api.deps import get_database, get_principal, get_run_repository
 from bi_wiki.db.models import RunORM
+from bi_wiki.ingest.tables import IngestORM, RequestORM, RevisionORM
 from bi_wiki.main import create_app
 from bi_wiki.services.auth import Principal
 
@@ -43,10 +44,8 @@ async def test_not_found_and_validation_do_not_echo_input(client):
 @pytest.mark.parametrize(
     ("path", "body"),
     [
-        ("/api/v1/ingests", {"source_ref": "inbox/example.md"}),
         ("/api/v1/queries", {"question": "什么是日活？"}),
         ("/api/v1/lints", {}),
-        (f"/api/v1/runs/{uuid4()}/approve", {"plan_version": 1}),
         (f"/api/v1/runs/{uuid4()}/cancel", {}),
     ],
 )
@@ -113,6 +112,9 @@ async def test_run_routes_support_repository_override(client):
 async def test_startup_fails_when_database_schema_is_unavailable(database):
     config, db = database
     async with db.engine.begin() as connection:
+        await connection.execute(DropTable(RequestORM.__table__))
+        await connection.execute(DropTable(RevisionORM.__table__))
+        await connection.execute(DropTable(IngestORM.__table__))
         await connection.execute(DropTable(RunORM.__table__))
     application = create_app(config.model_copy(update={"initialize_database": False}))
     with pytest.raises(RuntimeError, match="DATABASE_UNAVAILABLE") as error:

@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bi_wiki.core.config import Settings
 from bi_wiki.db.models import Base, RunORM
+from bi_wiki.ingest import tables
 
 
 class Database:
@@ -28,6 +29,15 @@ class Database:
         # 检查实际数据库与任务表，而非返回一个与存储无关的固定 healthy。
         async with self.engine.connect() as connection:
             await connection.execute(select(RunORM.run_id).limit(1))
+            for model in (
+                tables.SourceORM,
+                tables.ConfigORM,
+                tables.IngestORM,
+                tables.DefinitionORM,
+                tables.RevisionORM,
+                tables.RequestORM,
+            ):
+                await connection.execute(select(model).limit(0))
 
     async def close(self) -> None:
         await self.engine.dispose()

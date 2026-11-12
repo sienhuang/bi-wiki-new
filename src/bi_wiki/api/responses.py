@@ -12,7 +12,7 @@ T = TypeVar("T")
 # These errors form the shared application contract. HTTP status remains meaningful.
 ERROR_RESPONSES = {
     status: {"model": ApiResponse[None]}
-    for status in (400, 401, 403, 404, 405, 409, 422, 500, 501, 503)
+    for status in (400, 401, 403, 404, 405, 409, 413, 415, 422, 500, 501, 503)
 }
 
 

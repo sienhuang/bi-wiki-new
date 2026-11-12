@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
@@ -15,6 +16,11 @@ from bi_wiki.core.errors import ServiceError
 from bi_wiki.core.logging import logger, setup_logging
 from bi_wiki.core.request_logging import RequestLoggingMiddleware
 from bi_wiki.db.database import Database
+from bi_wiki.ingest.api import router as ingest_router
+from bi_wiki.ingest.extractor import Extractor
+from bi_wiki.ingest.raw_s3 import create_raw_store
+from bi_wiki.ingest.service import IngestService
+from bi_wiki.llm.factory import create_provider
 from bi_wiki.models.responses import ValidationDetail
 from bi_wiki.repositories.runs import RunRepository
 from bi_wiki.services.auth import MoaAuthProvider
@@ -31,9 +37,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.settings = config
         application.state.database = database
         application.state.runs = RunRepository(database.sessions)
+        application.state.model_provider = create_provider(config)
+        raw = None
         auth_client = httpx.AsyncClient(timeout=config.moa_timeout_seconds, follow_redirects=False)
         application.state.auth_provider = MoaAuthProvider(config, auth_client)
         try:
+            raw = await asyncio.to_thread(create_raw_store, config)
+            application.state.ingest = IngestService(
+                database.sessions,
+                raw,
+                Extractor(application.state.model_provider),
+                timeouts=config.ingest_timeouts,
+            )
             if config.initialize_database:
                 await database.initialize()
             await database.check()
@@ -45,6 +60,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             raise RuntimeError("DATABASE_UNAVAILABLE: 数据库初始化或连接失败，请检查配置") from None
         finally:
+            if raw is not None:
+                await asyncio.to_thread(raw.close)
             await auth_client.aclose()
             await database.close()
             logger.info("service_stopped")
@@ -95,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(health_router)
     application.include_router(auth_router)
     application.include_router(router)
+    application.include_router(ingest_router)
     return application
 
 

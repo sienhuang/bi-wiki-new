@@ -13,12 +13,27 @@ from bi_wiki.services.auth import Principal
 
 
 @pytest_asyncio.fixture
-async def database():
+async def database(tmp_path):
     runtime = get_settings()
     # 所有 DDL 前校验，测试只操作独立测试库内本次随机 schema。
     url = checked_test_url(runtime)
     schema = f"test_{uuid4().hex}"
-    config = runtime.model_copy(update={"database_url": SecretStr(url), "database_schema": schema})
+    config = runtime.model_copy(
+        update={
+            "database_url": SecretStr(url),
+            "database_schema": schema,
+            "raw_root": tmp_path / "raw",
+            "raw_backend": "local",
+            "llm_provider": "openai",
+            "llm_timeout_seconds": 300,
+            "ingest_overhead_seconds": 30,
+            "ingest_recovery_grace_seconds": 60,
+            "llm_cli_command": [],
+            "llm_base_url": "",
+            "llm_model": "",
+            "llm_api_key": None,
+        }
+    )
     db = Database(config)
     try:
         async with db.engine.begin() as connection:

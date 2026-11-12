@@ -87,3 +87,87 @@ lifespan 继续负责创建与释放，app.state 保存共享实例；内部类�
 ApiRouter 集中错误模型，ApiResponse[T] 与 ResponderDep 构造成功响应，异常处理器处理失败。
 前端 apiRequest 统一解包，MOA 门禁保留；docs/OpenAPI 不包裹。基线 V1.2。
 62 项后端测试、Ruff、前端构建及 8 项模拟浏览器测试通过。需前后端配套更新，真实账号登录尚未验证。
+
+## Ontology Ingest 首版（2026-11-10）
+
+用户确认前后端Ontology设计并要求开始首版，基线升级V1.3。已实现个人MOA空间内的MD/TXT来源、
+原始字节与哈希去重、固定document-v1提取、ontology-v1候选定义/关系、原文证据校验、不可变计划、
+本人批准/拒绝、PostgreSQL事务发布、知识和revision浏览。正式知识以数据库为依据，Markdown为
+同事务派生展示文本；不创建第二套文件事实存储。Raw在var/raw独立保存。
+配置页面可发布提取类型、数量和业务说明新版本，每Run固定配置快照；没有任意Schema/工具编辑。
+生产代码未提供认证绕过。模型通过环境配置的chat/completions兼容服务调用；无配置时明确503。
+当前固定提取步骤，不宣称自主Agent循环；未实现Query、独立Lint、通用Cancel、队列或多人审批。
+验证：84项后端测试、Ruff、前端构建、9项浏览器模拟测试通过；真实浏览器→代理→API→PostgreSQL
+隔离联调通过（身份/模型为测试替身），临时进程与数据清理完成。真实模型与真实账号成功登录未验收。
+工作台chunk约619KB，已按需加载但仍有体积警告。启动/边界/完整报告见docs/INGEST_V1.md。
+
+
+## 统一模型 Provider（2026-11-11）
+
+用户授权抽出统一 Provider 层，重点是业务与模型连接分离，并非改为 CLI。
+新增 llm 的 Protocol、配置工厂、OpenAICompatibleProvider；Extractor 构造注入 Provider，
+只保留提示词与 Ontology 结构校验。lifespan 创建共享无连接状态 Provider，各次请求关闭 HTTP 客户端。
+现有 INGEST_MODEL_* 环境配置继续有效，无凭据迁移、数据库/API结构变更或新增依赖。
+HTTP失败分类且不回显上游正文，模型名称从Provider写入任务快照。
+测试配置显式清空模型凭据，避免读取本地配置后意外请求真实网关。
+验证：103项pytest通过（含独立PostgreSQL及MockTransport），Ruff通过。
+真实模型成功调用尚未验收，先前预算池403不能由抽象层重构解决。
+
+
+## 通用配置与 CLI Provider（2026-11-11）
+
+用户明确不保留 INGEST_MODEL_* 兼容，已直接改为 BI_WIKI_LLM_PROVIDER/MODEL/BASE_URL/API_KEY，
+增加 LLM_CLI_COMMAND（JSON参数数组）和 LLM_TIMEOUT_SECONDS。用户本地.env仅迁移字段名，
+保留原配置值，不自动切换当前HTTP Provider。旧变量无别名、不再读取；本节覆盖上节兼容决定。
+工厂支持 openai/cli；CLI通过stdin传提示词、stdout取纯文本，参数中{model}替换模型名。
+CLI不通用映射temperature/max_tokens，需要具体命令自行配置；JSON仍须领域校验。
+命令无Shell、stderr并发消费且不回显，stdout/stderr各限1MB；超时/取消清理进程及POSIX进程组。
+全量115项pytest通过，含真实PostgreSQL和本地测试子进程；未执行真实CLI模型端到端调用。
+
+
+2026-11-11 统一超时：模型300秒、执行330秒、客户端360秒、恢复390秒；配置由模型时间、
+执行预留30秒、恢复宽限60秒推导。新任务保存策略快照，恢复依据最后更新时间，HTTP实现总时长限制。
+前端获取策略并在等待超时后按原请求键只读查找，再按run_id轮询。117后端测试、10浏览器测试、
+前端构建及Ruff通过。真实长文成功提取未验证。用户随后提出应直接轮询；当前POST仍同步，
+异步立即返回202+run_id需要后续改造任务执行方式，尚未实现。
+
+
+## 2026-11-11 真实模型链路验收
+
+用户要求优先验证全流程，暂不优化模型耗时、不引入后台任务。
+本地用户将模型等待设为3000秒、处理预留300秒、恢复宽限600秒；保留其值，
+放宽配置允许的模型等待上限到3600秒。对应执行3300秒、前端3330秒、恢复3900秒。
+测试fixture显式固定时间参数，避免用户本地调参影响回归。
+使用临时验收脚本 /tmp/biwiki_real_model_e2e.py，通过ASGI HTTP客户端、真实已配置模型和
+独立测试库随机schema，完成虚构MD上传→单指标提取→确定性校验PASS→待审批→测试批准→
+知识列表/详情/Markdown/版本读取。提取22.57秒，最终succeeded。身份为测试注入，非真实MOA；
+本轮不包含浏览器或代理，也未重跑用户原始长文。测试schema与Raw临时目录已清理，正式知识未改动。
+uv run --locked pytest -q -p no:cacheprovider：117 passed；ruff check src tests通过。
+需重启运行后端加载新的本地配置，并对用户原资料执行“重新生成”后人工审核。
+
+
+2026-11-11 最新正式Ingest运行790.21秒后MODEL_OUTPUT_INVALID，模型调用已返回文本，失败在
+Extraction Schema校验；先前实现未保留模型原文或校验明细，不能追溯具体违规字段。
+Provider新增finish_reason=length/content_filter明确分类；Extractor错误提供最多5项已知Schema字段
+位置和中文类型提示，未知键脱敏，不回显input/ctx/原始正文。提示词明确必填字段、属性字符串、
+候选数量和纯JSON要求；未放宽Schema，未自动修复或重复调用模型。
+119项回归测试通过，Ruff通过。该长文的具体错误原因仍需新请求的诊断结果，不能宣称已修复。
+
+
+## S3 RawStore（2026-11-12）
+
+用户授权参考老BI-WIKI扩展Raw存储；参考app/infra/storage/s3.py/factory.py的boto3+线程池模式。
+新增RawStorage协议、S3RawStore及create_raw_store，默认local，lifespan选择并关闭。
+S3参数包括bucket/prefix/endpoint/region/凭据/session token/addressing style；支持标准SDK凭据链。
+使用IfNoneMatch=*条件创建，412核验既有对象；不自动建桶、不覆盖、不公开访问；128KiB读取上限和
+SHA256复核，关闭响应体。409等错误明确失败，不回退无条件写入。服务层沿用线程池和MOA归属校验。
+不改来源表，存储为部署级选择；已有Raw不自动迁移，切换需先复制并核验，未实施双读。
+添加boto3依赖和锁文件。测试使用Stubber，不触及真实桶；S3与PostgreSQL接口集成通过。
+发现用户新增extractor日志使用未定义logger且输出正文，保留日志意图改为字符数并导入logger。
+全量128项通过，之后新增损坏对象及S3接口测试，专项11项通过；Ruff和diff检查通过。
+真实S3/MinIO端到端未验证；默认本地配置未改，也未读取旧项目凭据。
+
+2026-11-12 用户重新导入任务在902.86秒后MODEL_UNAVAILABLE，前一任务已succeeded。
+同期最小HTTP模型探针200、2.12秒，当前基础连接可用；约15分钟耗时提示需查长请求连接中断，
+既有记录未保存异常类型，不能断言具体网关限制。新增脱敏传输类型/耗时日志和错误提示，
+区分ConnectError与RemoteProtocolError/ReadError；不记录正文、凭据、URL或原始异常消息。
